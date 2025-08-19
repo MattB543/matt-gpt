@@ -1,0 +1,18 @@
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# MCP configuration
+.mcp.json
+
+# Raw data directory
+raw_data/
+
+# Python cache files
+__pycache__/
+
+# Log files
+*.log
