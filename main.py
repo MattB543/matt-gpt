@@ -96,6 +96,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     query_id: str
+    ok: bool = True
+    error_details: Optional[str] = None
     tokens_used: Optional[int] = None
     latency_ms: float
     context_items_used: int
@@ -163,16 +165,24 @@ async def chat_endpoint(
     try:
         # Use Matt-GPT to generate response with user's API key
         logger.debug("Calling MattGPT system with user's OpenRouter key...")
+        logger.info(f"User API key starts with: {request.openrouter_api_key[:20]}...")
         result = app.state.matt_gpt(request.message, user_openrouter_key=request.openrouter_api_key)
         response_text = result.response
         context_used = result.context_used
         logger.info(f"MattGPT response generated successfully with user's key")
         
     except Exception as e:
-        logger.error(f"MattGPT generation failed: {e}")
-        # Fallback to simple response
-        response_text = f"Sorry, I encountered an error processing your message. Please check your OpenRouter API key and try again."
+        import traceback
+        logger.error(f"MattGPT generation failed with detailed error: {e}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        # Return the actual error for debugging
+        response_text = f"Sorry, I encountered an error processing your message."
+        error_details = str(e)
         context_used = []
+        is_error = True
+    else:
+        error_details = None
+        is_error = False
     
     latency_ms = (time.time() - start_time) * 1000
     logger.info(f"Generated response in {latency_ms:.2f}ms")
@@ -198,6 +208,8 @@ async def chat_endpoint(
     return ChatResponse(
         response=response_text,
         query_id=query_id,
+        ok=not is_error,
+        error_details=error_details,
         latency_ms=latency_ms,
         context_items_used=len(context_used) if 'context_used' in locals() else 0
     )

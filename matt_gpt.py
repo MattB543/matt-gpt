@@ -28,8 +28,8 @@ class MattGPT(dspy.Module):
     def __init__(self, retriever):
         super().__init__()
         self.retrieve = retriever
-        self.generate = dspy.ChainOfThought(MattResponse)
-        logger.info("MattGPT module initialized with retriever and ChainOfThought")
+        # Don't create ChainOfThought here to avoid LM binding issues
+        logger.info("MattGPT module initialized with retriever")
 
     def forward(self, question: str, user_openrouter_key: Optional[str] = None):
         logger.info(f"Processing question: {question[:100]}...")
@@ -44,35 +44,52 @@ class MattGPT(dspy.Module):
         context_str = "\n\n".join(context[:50])  # Limit context size
         logger.debug(f"Context formatted, total length: {len(context_str)} characters")
 
-        # Update DSPy LM with user's API key if provided
+        # Bypass DSPy contexts and use direct LM calls for now
         if user_openrouter_key:
             logger.info("Using user-provided OpenRouter API key for generation")
-            user_lm = dspy.LM(
-                model="openrouter/anthropic/claude-3.5-sonnet",
-                api_key=user_openrouter_key,
-                api_base="https://openrouter.ai/api/v1",
-                temperature=0.7,
-                max_tokens=1000
-            )
-            # Temporarily configure DSPy with user's LM
-            old_lm = dspy.settings.lm
-            dspy.settings.configure(lm=user_lm)
+            logger.debug(f"User API key in matt_gpt: {user_openrouter_key[:20]}...")
             
+            from llm_client import OpenRouterClient
+            
+            # Use direct OpenRouter client call as fallback
+            logger.debug("Generating response with user's OpenRouter key via direct client...")
             try:
-                # Generate response with user's key
-                logger.debug("Generating response with user's OpenRouter key...")
-                prediction = self.generate(
-                    context=context_str,
-                    question=question
-                )
-                logger.info("Response generated successfully with user's key")
-            finally:
-                # Restore original LM
-                dspy.settings.configure(lm=old_lm)
+                logger.debug("Creating OpenRouterClient with user key...")
+                user_client = OpenRouterClient(api_key=user_openrouter_key)
+                logger.debug("OpenRouterClient created successfully")
+                
+                # Format prompt manually
+                prompt = f"""You are Matt, responding authentically based on your communication style and experiences.
+
+Context from Matt's messages and personality:
+{context_str}
+
+User question: {question}
+
+Respond as Matt would, using his voice and communication style:"""
+
+                logger.debug("Calling chat_completion...")
+                messages = [{"role": "user", "content": prompt}]
+                response = user_client.chat_completion(messages=messages, max_tokens=1000)
+                logger.debug("chat_completion returned successfully")
+                
+                response_text = response.choices[0].message.content
+                logger.debug(f"Response text extracted: {response_text[:50]}...")
+                
+                # Create mock DSPy prediction object
+                prediction = type('Prediction', (), {'response': response_text})()
+                logger.info("Response generated successfully with user's key via direct client")
+                
+            except Exception as e:
+                import traceback
+                logger.error(f"Direct client generation failed: {e}")
+                logger.error(f"Direct client traceback: {traceback.format_exc()}")
+                raise
         else:
-            # Use default environment key
+            # Use default environment key with ChainOfThought
             logger.debug("Generating response with environment OpenRouter key...")
-            prediction = self.generate(
+            generate = dspy.ChainOfThought(MattResponse)
+            prediction = generate(
                 context=context_str,
                 question=question
             )
