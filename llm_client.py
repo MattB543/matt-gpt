@@ -1,6 +1,7 @@
 from openai import OpenAI
 import os
 import logging
+import hashlib
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -8,6 +9,9 @@ load_dotenv()
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Simple in-memory cache for embeddings to avoid API calls
+_embedding_cache = {}
 
 
 class OpenRouterClient:
@@ -62,8 +66,16 @@ class OpenRouterClient:
             raise
 
     def generate_embedding(self, text: str) -> list[float]:
-        """Generate embeddings using OpenAI directly"""
-        logger.debug(f"Generating embedding for text: {text[:50]}...")
+        """Generate embeddings using OpenAI directly with caching"""
+        # Create cache key from text hash
+        cache_key = hashlib.md5(text.encode('utf-8')).hexdigest()
+        
+        # Check cache first
+        if cache_key in _embedding_cache:
+            logger.debug(f"Using cached embedding for text: {text[:50]}...")
+            return _embedding_cache[cache_key]
+        
+        logger.debug(f"Generating new embedding for text: {text[:50]}...")
         
         openai_key = os.getenv("OPENAI_API_KEY")
         if not openai_key:
@@ -78,8 +90,21 @@ class OpenRouterClient:
                 input=text,
                 dimensions=1536
             )
-            logger.debug(f"Embedding generated successfully, dimensions: {len(response.data[0].embedding)}")
-            return response.data[0].embedding
+            embedding = response.data[0].embedding
+            
+            # Cache the result
+            _embedding_cache[cache_key] = embedding
+            logger.debug(f"Embedding generated and cached, dimensions: {len(embedding)}")
+            
+            # Basic cache size management - keep only recent 100 entries
+            if len(_embedding_cache) > 100:
+                # Remove oldest half of cache entries
+                keys_to_remove = list(_embedding_cache.keys())[:50]
+                for key in keys_to_remove:
+                    del _embedding_cache[key]
+                logger.debug("Cleaned embedding cache")
+            
+            return embedding
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}")
             raise

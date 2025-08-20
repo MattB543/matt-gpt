@@ -8,6 +8,7 @@ import time
 import uuid
 import logging
 import os
+import asyncio
 from datetime import datetime
 
 from database import init_db, get_session
@@ -166,11 +167,26 @@ async def chat_endpoint(
         # Use Matt-GPT to generate response with user's API key
         logger.debug("Calling MattGPT system with user's OpenRouter key...")
         logger.info(f"User API key starts with: {request.openrouter_api_key[:20]}...")
-        result = app.state.matt_gpt(request.message, user_openrouter_key=request.openrouter_api_key)
+        
+        # Add application-level timeout (30 seconds)
+        async def run_matt_gpt():
+            return app.state.matt_gpt(request.message, user_openrouter_key=request.openrouter_api_key)
+        
+        result = await asyncio.wait_for(
+            asyncio.create_task(asyncio.to_thread(run_matt_gpt)), 
+            timeout=30.0
+        )
+        
         response_text = result.response
         context_used = result.context_used
         logger.info(f"MattGPT response generated successfully with user's key")
         
+    except asyncio.TimeoutError:
+        logger.error("MattGPT generation timed out after 30 seconds")
+        response_text = "Sorry, the request timed out. The system is experiencing slow response times."
+        error_details = "Request timeout (30s)"
+        context_used = []
+        is_error = True
     except Exception as e:
         import traceback
         logger.error(f"MattGPT generation failed with detailed error: {e}")
@@ -224,4 +240,10 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        timeout_keep_alive=30,  # Increase keep-alive timeout
+        timeout_graceful_shutdown=30  # Increase graceful shutdown timeout
+    )

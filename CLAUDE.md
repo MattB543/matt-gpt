@@ -66,7 +66,7 @@ python test_retrieval.py
 - **Vector Search**: HNSW indexes with cosine similarity for optimal performance
 
 **Database Schema:**
-- `messages`: Slack messages with embeddings and metadata
+- `messages`: Slack messages with embeddings and meta_data
 - `personality_docs`: Curated personality information with embeddings  
 - `query_logs`: All API interactions for analytics
 

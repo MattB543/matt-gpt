@@ -389,7 +389,7 @@ class Message(SQLModel, table=True):
     message_text: str (Core content)
     timestamp: datetime (Index: Temporal relevance)
     embedding: List[float] (Vector: 1536 dimensions)
-    metadata: dict (JSON: Source-specific data)
+    meta_data: dict (JSON: Source-specific data)
 ```
 
 #### QueryLog Schema
@@ -615,7 +615,7 @@ class Message(SQLModel, table=True):
     embedding: Optional[list[float]] = Field(
         sa_column=Column(Vector(1536))  # OpenAI text-embedding-3-small
     )
-    metadata: dict = Field(default={}, sa_column=Column(JSON))
+    meta_data: dict = Field(default={}, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class PersonalityDoc(SQLModel, table=True):
@@ -629,7 +629,7 @@ class PersonalityDoc(SQLModel, table=True):
     embedding: Optional[list[float]] = Field(
         sa_column=Column(Vector(1536))
     )
-    metadata: dict = Field(default={}, sa_column=Column(JSON))
+    meta_data: dict = Field(default={}, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class QueryLog(SQLModel, table=True):
@@ -645,7 +645,7 @@ class QueryLog(SQLModel, table=True):
     latency_ms: float
     ip_address: Optional[str]
     user_agent: Optional[str]
-    metadata: dict = Field(default={}, sa_column=Column(JSON))
+    meta_data: dict = Field(default={}, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 ```
 
@@ -1003,7 +1003,7 @@ async def log_query(
             latency_ms=latency_ms,
             ip_address=client_info.get("ip"),
             user_agent=client_info.get("user_agent"),
-            metadata={"version": "1.0.0"}
+            meta_data={"version": "1.0.0"}
         )
         session.add(log_entry)
         session.commit()
@@ -1092,7 +1092,7 @@ class DataProcessor:
                         message_text=msg['text'],
                         timestamp=msg['timestamp'],
                         embedding=embedding,
-                        metadata=msg.get('metadata', {})
+                        meta_data=msg.get('metadata', {})
                     )
                     session.add(db_message)
 

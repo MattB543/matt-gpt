@@ -102,7 +102,7 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
 
         except Exception as e:
             logger.error(f"Message retrieval query failed: {e}")
-            return []
+            raise
 
         # Format as conversational context
         formatted = []
@@ -134,7 +134,7 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
 
         except Exception as e:
             logger.error(f"Personality doc retrieval query failed: {e}")
-            return []
+            raise
 
         formatted = []
         for title, content, distance in results:
