@@ -234,25 +234,6 @@ class TextMessageProcessor:
         
         return success_count
 
-    def _load_existing_message_ids(self):
-        """Load existing message IDs from database to avoid duplicates"""
-        logger.info("Loading existing message IDs to avoid duplicates...")
-        
-        try:
-            with get_session() as session:
-                existing_messages = session.exec(
-                    select(Message).where(Message.source == 'text')
-                ).all()
-                
-                for msg in existing_messages:
-                    if msg.meta_data and 'message_id' in msg.meta_data:
-                        self.existing_message_ids.add(msg.meta_data['message_id'])
-                
-                logger.info(f"Loaded {len(self.existing_message_ids)} existing message IDs")
-                
-        except Exception as e:
-            logger.error(f"Failed to load existing message IDs: {e}")
-            # Continue anyway, might result in some duplicates
     
     def _log_final_stats(self, stats: Dict[str, int]):
         """Log comprehensive processing statistics"""
