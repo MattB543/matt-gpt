@@ -14,6 +14,17 @@ logger = logging.getLogger(__name__)
 _embedding_cache = {}
 
 
+def get_current_trace():
+    """Get current trace context from FastAPI app state"""
+    try:
+        from main import app
+        if hasattr(app.state, 'current_trace'):
+            return app.state.current_trace
+    except:
+        pass
+    return None
+
+
 class OpenRouterClient:
     """Wrapper for OpenRouter API using OpenAI SDK"""
 
@@ -52,6 +63,13 @@ class OpenRouterClient:
         logger.info(f"Requesting chat completion with model: {model}")
         logger.debug(f"Message count: {len(messages)}, max_tokens: {max_tokens}")
         
+        # Get trace context if available
+        trace = get_current_trace()
+        api_key_prefix = self.client.api_key[:15] + "..." if self.client.api_key else "None"
+        
+        if trace:
+            trace.log_llm_request(messages, model, api_key_prefix)
+        
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -59,6 +77,20 @@ class OpenRouterClient:
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+            
+            response_text = response.choices[0].message.content
+            response_data = {
+                "model": model,
+                "usage": response.usage.model_dump() if response.usage else None,
+                "finish_reason": response.choices[0].finish_reason,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            
+            # Log to trace if available
+            if trace:
+                trace.log_llm_response(response_data, response_text)
+            
             logger.info(f"Chat completion successful, tokens used: {response.usage.total_tokens if response.usage else 'unknown'}")
             return response
         except Exception as e:
@@ -83,7 +115,7 @@ class OpenRouterClient:
             raise ValueError("OPENAI_API_KEY required for embeddings")
         
         try:
-            # Use OpenAI client for embeddings (more reliable)
+            # Use OpenAI client for embeddings
             openai_client = OpenAI(api_key=openai_key)
             response = openai_client.embeddings.create(
                 model="text-embedding-3-small",
@@ -92,13 +124,18 @@ class OpenRouterClient:
             )
             embedding = response.data[0].embedding
             
+            # Log to trace if available
+            trace = get_current_trace()
+            if trace:
+                api_key_prefix = openai_key[:15] + "..." if openai_key else "None"
+                trace.log_embedding_generation(text, embedding, api_key_prefix)
+            
             # Cache the result
             _embedding_cache[cache_key] = embedding
             logger.debug(f"Embedding generated and cached, dimensions: {len(embedding)}")
             
-            # Basic cache size management - keep only recent 100 entries
+            # Basic cache size management
             if len(_embedding_cache) > 100:
-                # Remove oldest half of cache entries
                 keys_to_remove = list(_embedding_cache.keys())[:50]
                 for key in keys_to_remove:
                     del _embedding_cache[key]

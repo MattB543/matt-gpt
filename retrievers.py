@@ -14,6 +14,13 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 
+def get_current_trace():
+    """Get current trace context from FastAPI app state"""
+    # Removed circular import - this function is no longer needed
+    # since we removed all tracing functionality
+    return None
+
+
 class PostgreSQLVectorRetriever(dspy.Retrieve):
     """Custom retriever using PostgreSQL with pgvector"""
 
@@ -27,10 +34,10 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
         """Retrieve relevant passages from PostgreSQL"""
         logger.info(f"Retrieving context for query: {query[:100]}...")
         
-        # Generate query embedding using environment key (for retrieval only)
+        # Generate query embedding using environment key
         logger.debug("Generating query embedding...")
         from llm_client import OpenRouterClient
-        client = OpenRouterClient()  # Use environment key for embeddings
+        client = OpenRouterClient()
         query_embedding = client.generate_embedding(query)
         logger.debug(f"Query embedding generated: {len(query_embedding)} dimensions")
 
@@ -49,6 +56,20 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
                 results.extend(messages)
                 logger.info(f"Retrieved {len(messages)} message contexts")
 
+                # === RAG MESSAGE RETRIEVAL LOGGING ===
+                logger.info("=" * 60)
+                logger.info("RAG MESSAGE RETRIEVAL DETAILS:")
+                logger.info("=" * 60)
+                for i, msg in enumerate(messages[:5]):  # Log first 5 messages
+                    logger.info(f"MESSAGE {i+1}:")
+                    logger.info(f"  Content: {msg[:150]}...")
+                    if len(msg) > 150:
+                        logger.info(f"  (truncated from {len(msg)} chars)")
+                    logger.info("-" * 30)
+                if len(messages) > 5:
+                    logger.info(f"... and {len(messages) - 5} more messages")
+                logger.info("=" * 60)
+
                 # 2. Find relevant personality docs
                 logger.debug("Retrieving relevant personality documents...")
                 docs = self._retrieve_personality_docs(
@@ -57,9 +78,26 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
                 results.extend(docs)
                 logger.info(f"Retrieved {len(docs)} personality documents")
 
+                # === RAG PERSONALITY DOCS LOGGING ===
+                logger.info("=" * 60)
+                logger.info("RAG PERSONALITY DOCS DETAILS:")
+                logger.info("=" * 60)
+                for i, doc in enumerate(docs):
+                    logger.info(f"PERSONALITY DOC {i+1}:")
+                    logger.info(f"  Content: {doc[:150]}...")
+                    if len(doc) > 150:
+                        logger.info(f"  (truncated from {len(doc)} chars)")
+                    logger.info("-" * 30)
+                logger.info("=" * 60)
+
         except Exception as e:
             logger.error(f"Vector retrieval failed: {e}")
             raise
+
+        # Log to trace if available
+        trace = get_current_trace()
+        if trace:
+            trace.log_context_retrieval(messages, docs)
 
         logger.info(f"Total context items retrieved: {len(results)}")
         return dspy.Prediction(passages=results)
@@ -67,49 +105,105 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
     def _retrieve_messages_with_context(
         self, conn, embedding: list, limit: int = 10, context_window: int = 10
     ) -> List[str]:
-        """Retrieve messages with surrounding context"""
+        """Retrieve messages with surrounding context, grouped by thread and date"""
         logger.debug(f"Searching for {limit} most relevant messages with {context_window}min context window")
 
-        # Use HNSW index with cosine similarity (best practice for normalized vectors)
-        query = """
-        WITH relevant_messages AS (
-            SELECT
-                id, thread_id, message_text, timestamp,
-                (embedding <=> %s::vector) as distance
-            FROM messages
-            WHERE embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-        ),
-        context_messages AS (
-            SELECT DISTINCT m.message_text, m.timestamp, rm.distance
-            FROM messages m
-            INNER JOIN relevant_messages rm ON m.thread_id = rm.thread_id
-            WHERE m.timestamp BETWEEN rm.timestamp - interval '%s minutes'
-                  AND rm.timestamp + interval '%s minutes'
-        )
-        SELECT message_text, timestamp, distance
-        FROM context_messages
-        ORDER BY distance, timestamp;
+        # First, find relevant messages (only those with >20 chars)
+        relevant_query = """
+        SELECT id, thread_id, message_text, timestamp, (embedding <=> %s::vector) as distance
+        FROM messages
+        WHERE embedding IS NOT NULL 
+        AND LENGTH(message_text) > 20
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
         """
 
         try:
             with conn.cursor() as cur:
-                cur.execute(query, (embedding, embedding, limit,
-                                  context_window, context_window))
-                results = cur.fetchall()
-                logger.debug(f"Found {len(results)} contextual messages")
+                # Get relevant messages
+                cur.execute(relevant_query, (embedding, embedding, limit))
+                relevant_messages = cur.fetchall()
+                logger.debug(f"Found {len(relevant_messages)} relevant messages with >20 chars")
+
+                if not relevant_messages:
+                    return []
+
+                # Get unique thread_id and date combinations from relevant messages
+                thread_dates = set()
+                for _, thread_id, _, timestamp, _ in relevant_messages:
+                    if thread_id:
+                        date_str = timestamp.date()
+                        thread_dates.add((thread_id, date_str))
+
+                # Now get ALL messages from those thread/date combinations
+                all_context_messages = []
+                for thread_id, date in thread_dates:
+                    context_query = """
+                    SELECT message_text, timestamp, thread_id, meta_data
+                    FROM messages
+                    WHERE thread_id = %s 
+                    AND DATE(timestamp) = %s
+                    ORDER BY timestamp
+                    """
+                    cur.execute(context_query, (thread_id, date))
+                    thread_messages = cur.fetchall()
+                    all_context_messages.extend(thread_messages)
+
+                logger.debug(f"Found {len(all_context_messages)} total contextual messages from {len(thread_dates)} thread/date groups")
 
         except Exception as e:
             logger.error(f"Message retrieval query failed: {e}")
             raise
 
-        # Format as conversational context
-        formatted = []
-        for text, timestamp, distance in results:
-            formatted.append(f"[{timestamp}] {text}")
+        # Log search results to trace if available
+        trace = get_current_trace()
+        if trace:
+            search_results = []
+            for _, _, text, timestamp, distance in relevant_messages:
+                search_results.append({
+                    "text": text[:100] + "..." if len(text) > 100 else text,
+                    "timestamp": str(timestamp),
+                    "similarity_distance": float(distance),
+                    "similarity_score": 1.0 - float(distance)
+                })
+            trace.log_vector_search(embedding, search_results)
 
-        logger.debug(f"Formatted {len(formatted)} message contexts")
+        # Group and format messages by thread and date
+        from collections import defaultdict
+        grouped_messages = defaultdict(list)
+        thread_display_names = {}
+        
+        for text, timestamp, thread_id, meta_data in all_context_messages:
+            date_str = timestamp.date().strftime("%Y-%m-%d")
+            
+            # Get display name from meta_data if available for thread header
+            thread_display_name = thread_id
+            if meta_data and isinstance(meta_data, dict) and 'display_name' in meta_data:
+                thread_display_name = meta_data['display_name']
+                thread_display_names[thread_id] = thread_display_name
+            elif thread_id in thread_display_names:
+                thread_display_name = thread_display_names[thread_id]
+            
+            # Get sender name for message prefix
+            sender_name = "Unknown"
+            if meta_data and isinstance(meta_data, dict):
+                if 'display_name' in meta_data:
+                    sender_name = meta_data['display_name']
+                elif 'phone_number' in meta_data:
+                    sender_name = meta_data['phone_number']
+            
+            key = f"{thread_display_name} - {date_str}"
+            grouped_messages[key].append((timestamp, text, sender_name))
+
+        # Format chronologically with thread/date headers
+        formatted = []
+        for thread_date, messages in sorted(grouped_messages.items()):
+            formatted.append(f"\n=== {thread_date} ===")
+            for timestamp, text, sender_name in sorted(messages):
+                formatted.append(f"{sender_name}: {text}")
+            formatted.append("")  # Add blank line between groups
+
+        logger.debug(f"Formatted {len(formatted)} message contexts in {len(grouped_messages)} thread/date groups")
         return formatted
 
     def _retrieve_personality_docs(

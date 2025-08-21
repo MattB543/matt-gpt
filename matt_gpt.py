@@ -40,9 +40,24 @@ class MattGPT(dspy.Module):
         context = context_result.passages
         logger.info(f"Retrieved {len(context)} context passages")
 
+        # === RAG RESULTS LOGGING ===
+        logger.info("=" * 60)
+        logger.info("RAG RETRIEVAL RESULTS:")
+        logger.info("=" * 60)
+        for i, passage in enumerate(context[:10]):  # Log first 10 passages
+            logger.info(f"PASSAGE {i+1}:")
+            logger.info(f"  Content: {passage[:200]}...")
+            if len(passage) > 200:
+                logger.info(f"  (truncated from {len(passage)} chars)")
+            logger.info("-" * 40)
+        if len(context) > 10:
+            logger.info(f"... and {len(context) - 10} more passages")
+        logger.info("=" * 60)
+
         # Format context for generation
         context_str = "\n\n".join(context[:50])  # Limit context size
         logger.debug(f"Context formatted, total length: {len(context_str)} characters")
+        
 
         # Bypass DSPy contexts and use direct LM calls for now
         if user_openrouter_key:
@@ -68,6 +83,13 @@ User question: {question}
 
 Respond as Matt would, using his voice and communication style:"""
 
+                # === PROMPT INPUT LOGGING ===
+                logger.info("=" * 60)
+                logger.info("RAW PROMPT INPUT (User OpenRouter Key):")
+                logger.info("=" * 60)
+                logger.info(f"FULL PROMPT:\n{prompt}")
+                logger.info("=" * 60)
+
                 logger.debug("Calling chat_completion...")
                 messages = [{"role": "user", "content": prompt}]
                 response = user_client.chat_completion(messages=messages, max_tokens=1000)
@@ -75,6 +97,13 @@ Respond as Matt would, using his voice and communication style:"""
                 
                 response_text = response.choices[0].message.content
                 logger.debug(f"Response text extracted: {response_text[:50]}...")
+
+                # === PROMPT OUTPUT LOGGING ===
+                logger.info("=" * 60)
+                logger.info("RAW PROMPT OUTPUT (User OpenRouter Key):")
+                logger.info("=" * 60)
+                logger.info(f"FULL RESPONSE:\n{response_text}")
+                logger.info("=" * 60)
                 
                 # Create mock DSPy prediction object
                 prediction = type('Prediction', (), {'response': response_text})()
@@ -88,11 +117,29 @@ Respond as Matt would, using his voice and communication style:"""
         else:
             # Use default environment key with ChainOfThought
             logger.debug("Generating response with environment OpenRouter key...")
+            
+            # === PROMPT INPUT LOGGING (Environment Key) ===
+            logger.info("=" * 60)
+            logger.info("RAW PROMPT INPUT (Environment OpenRouter Key):")
+            logger.info("=" * 60)
+            logger.info(f"CONTEXT:\n{context_str}")
+            logger.info("-" * 40)
+            logger.info(f"QUESTION: {question}")
+            logger.info("=" * 60)
+            
             generate = dspy.ChainOfThought(MattResponse)
             prediction = generate(
                 context=context_str,
                 question=question
             )
+            
+            # === PROMPT OUTPUT LOGGING (Environment Key) ===
+            logger.info("=" * 60)
+            logger.info("RAW PROMPT OUTPUT (Environment OpenRouter Key):")
+            logger.info("=" * 60)
+            logger.info(f"FULL RESPONSE:\n{prediction.response}")
+            logger.info("=" * 60)
+            
             logger.info("Response generated successfully with environment key")
 
         return dspy.Prediction(

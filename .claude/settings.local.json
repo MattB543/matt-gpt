@@ -1,5 +1,12 @@
 {
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "20000",
+    "BASH_MAX_TIMEOUT_MS": "50000"
+  },
   "permissions": {
-    "defaultMode": "acceptEdits"
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(taskkill:*)"
+    ]
   }
 }

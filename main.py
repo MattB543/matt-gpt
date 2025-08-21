@@ -49,6 +49,7 @@ def verify_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(secu
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Matt-GPT API server...")
+    
     logger.info("Initializing database...")
     init_db()
     logger.info("Setting up MattGPT DSPy system...")
@@ -140,6 +141,52 @@ async def log_query(
         session.commit()
 
 
+def run_with_logging(matt_gpt, question, api_key):
+    """Wrapper to add console logging to matt_gpt processing"""
+    
+    # === REQUEST LOGGING ===
+    logger.info("=" * 80)
+    logger.info("NEW CHAT REQUEST RECEIVED")
+    logger.info("=" * 80)
+    logger.info(f"USER QUESTION: {question}")
+    logger.info(f"API KEY (truncated): {api_key[:20]}...")
+    logger.info(f"MODEL: anthropic/claude-3.5-sonnet")
+    logger.info("=" * 80)
+    
+    try:
+        # Call the forward method with user's API key - this handles retrieval internally
+        result = matt_gpt.forward(
+            question=question,
+            user_openrouter_key=api_key
+        )
+        
+        response_text = result.response
+        context_used = result.context_used
+        
+        # === RESPONSE LOGGING ===
+        logger.info("=" * 80)
+        logger.info("CHAT REQUEST COMPLETED")
+        logger.info("=" * 80)
+        logger.info(f"RESPONSE LENGTH: {len(response_text)} characters")
+        logger.info(f"CONTEXT ITEMS USED: {len(context_used)} items")
+        logger.info(f"FINAL RESPONSE:\n{response_text}")
+        logger.info("=" * 80)
+        
+        # Return result object
+        return type('Result', (), {
+            'response': response_text,
+            'context_used': context_used
+        })()
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error("CHAT REQUEST FAILED")
+        logger.error("=" * 80)
+        logger.error(f"ERROR: {e}", exc_info=True)
+        logger.error("=" * 80)
+        raise
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     request: ChatRequest,
@@ -148,6 +195,11 @@ async def chat_endpoint(
     token: str = Depends(verify_bearer_token)
 ):
     """Main chat endpoint with Matt-GPT DSPy implementation"""
+    
+    # Very basic console logging
+    print("*** CHAT ENDPOINT HIT! ***")
+    print(f"Query: {request.message}")
+    print(f"From IP: {client_info.get('ip', 'unknown')}")
     
     logger.info(f"Authenticated chat request from {client_info.get('ip', 'unknown')}")
     logger.debug(f"Message: {request.message[:50]}...")
@@ -163,23 +215,39 @@ async def chat_endpoint(
     start_time = time.time()
     query_id = str(uuid.uuid4())
     
+    # Log the API request details
+    logger.info(f"API Request to /chat endpoint")
+    logger.info(f"Model: {request.model}")
+    logger.info(f"Message length: {len(request.message)} chars")
+    logger.info(f"Client IP: {client_info.get('ip', 'unknown')}")
+    logger.info(f"User API key: {request.openrouter_api_key[:20]}...")
+    
     try:
-        # Use Matt-GPT to generate response with user's API key
-        logger.debug("Calling MattGPT system with user's OpenRouter key...")
-        logger.info(f"User API key starts with: {request.openrouter_api_key[:20]}...")
+        # Run MattGPT with logging
+        def run_matt_gpt_with_logging():
+            return run_with_logging(
+                app.state.matt_gpt,
+                request.message,
+                request.openrouter_api_key
+            )
         
-        # Add application-level timeout (30 seconds)
-        async def run_matt_gpt():
-            return app.state.matt_gpt(request.message, user_openrouter_key=request.openrouter_api_key)
-        
+        # Run in thread pool with timeout
         result = await asyncio.wait_for(
-            asyncio.create_task(asyncio.to_thread(run_matt_gpt)), 
+            asyncio.to_thread(run_matt_gpt_with_logging),
             timeout=30.0
         )
         
         response_text = result.response
         context_used = result.context_used
-        logger.info(f"MattGPT response generated successfully with user's key")
+        
+        # Log successful response
+        logger.info(f"Response generated successfully")
+        logger.info(f"Response length: {len(response_text)} chars")
+        logger.info(f"Context items used: {len(context_used)}")
+        logger.info(f"Response preview: {response_text[:200]}...")
+        
+        error_details = None
+        is_error = False
         
     except asyncio.TimeoutError:
         logger.error("MattGPT generation timed out after 30 seconds")
@@ -187,18 +255,16 @@ async def chat_endpoint(
         error_details = "Request timeout (30s)"
         context_used = []
         is_error = True
+        
     except Exception as e:
-        import traceback
+        import traceback as tb
         logger.error(f"MattGPT generation failed with detailed error: {e}")
-        logger.error(f"Full traceback: {traceback.format_exc()}")
-        # Return the actual error for debugging
+        logger.error(f"Full traceback: {tb.format_exc()}")
+        
         response_text = f"Sorry, I encountered an error processing your message."
         error_details = str(e)
         context_used = []
         is_error = True
-    else:
-        error_details = None
-        is_error = False
     
     latency_ms = (time.time() - start_time) * 1000
     logger.info(f"Generated response in {latency_ms:.2f}ms")
@@ -221,6 +287,10 @@ async def chat_endpoint(
     
     logger.debug(f"Query {query_id} logged for analytics")
     
+    # Very basic completion logging
+    print(f"*** CHAT COMPLETE! Response: {response_text[:50]}...")
+    print(f"*** Took: {latency_ms:.2f}ms")
+    
     return ChatResponse(
         response=response_text,
         query_id=query_id,
@@ -238,12 +308,14 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
 
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         app, 
         host="0.0.0.0", 
         port=8000,
-        timeout_keep_alive=30,  # Increase keep-alive timeout
-        timeout_graceful_shutdown=30  # Increase graceful shutdown timeout
+        timeout_keep_alive=30,
+        timeout_graceful_shutdown=30
     )
