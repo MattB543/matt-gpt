@@ -11,8 +11,15 @@
 # Raw data directory
 raw_data/
 
+# Claude folder
+claude/
+
+#outputs folder
+outputs/
+
 # Python cache files
 __pycache__/
 
 # Log files
 *.log
+outputs/

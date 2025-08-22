@@ -53,25 +53,64 @@ class TextMessageProcessor:
         
         logger.info(f"Found {len(self.existing_message_ids)} existing text message IDs")
 
+    def _identify_participating_threads(self, file_path: str) -> set:
+        """First pass: Identify threads where Matt sent at least one message"""
+        logger.info("First pass: Identifying threads where Matt participates...")
+        
+        participating_threads = set()
+        lines_scanned = 0
+        
+        with open(file_path, 'r', encoding='utf-8') as file:
+            for line_num, line in enumerate(file, 1):
+                lines_scanned += 1
+                
+                if line_num % 10000 == 0:
+                    logger.info(f"Scanned {line_num:,} lines, found {len(participating_threads)} participating threads")
+                
+                try:
+                    message_data = json.loads(line.strip())
+                    
+                    # Check if Matt sent this message (type == "2")
+                    if message_data.get("type") == "2":
+                        thread_id = message_data.get("thread_id")
+                        if thread_id:
+                            participating_threads.add(thread_id)
+                            
+                except json.JSONDecodeError:
+                    continue
+                except Exception:
+                    continue
+        
+        logger.info(f"Thread identification complete: {lines_scanned:,} lines scanned")
+        logger.info(f"Found {len(participating_threads)} threads where Matt participates")
+        return participating_threads
+
     def process_ndjson_file(self, file_path: str) -> Dict[str, int]:
-        """Process the text messages NDJSON file with streaming"""
+        """Process the text messages NDJSON file with smart thread filtering"""
         logger.info(f"Starting to process text messages from: {file_path}")
+        
+        # First pass: Identify participating threads
+        participating_threads = self._identify_participating_threads(file_path)
         
         stats = {
             "total_lines": 0,
             "valid_messages": 0,
             "filtered_by_date": 0,
+            "filtered_by_thread": 0,
             "skipped_duplicates": 0,
             "processed_messages": 0,
+            "messages_with_embeddings": 0,
+            "short_messages_no_embedding": 0,
             "batch_count": 0,
-            "errors": 0
+            "errors": 0,
+            "participating_threads": len(participating_threads)
         }
         
         batch = []
         
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
-                logger.info("Reading NDJSON file line by line...")
+                logger.info("Second pass: Processing messages from participating threads...")
                 
                 for line_num, line in enumerate(file, 1):
                     stats["total_lines"] += 1
@@ -90,6 +129,11 @@ class TextMessageProcessor:
                         
                         stats["valid_messages"] += 1
                         
+                        # Apply thread participation filter
+                        if processed_message["thread_id"] not in participating_threads:
+                            stats["filtered_by_thread"] += 1
+                            continue
+                        
                         # Apply date filter
                         if processed_message["timestamp"] < self.cutoff_date:
                             stats["filtered_by_date"] += 1
@@ -106,8 +150,10 @@ class TextMessageProcessor:
                         
                         # Process batch when full
                         if len(batch) >= self.batch_size:
-                            success_count = self._process_batch(batch)
-                            stats["processed_messages"] += success_count
+                            batch_stats = self._process_batch(batch)
+                            stats["processed_messages"] += batch_stats["processed"]
+                            stats["messages_with_embeddings"] += batch_stats["with_embeddings"]
+                            stats["short_messages_no_embedding"] += batch_stats["no_embeddings"]
                             stats["batch_count"] += 1
                             batch = []
                             
@@ -122,8 +168,10 @@ class TextMessageProcessor:
                 
                 # Process remaining batch
                 if batch:
-                    success_count = self._process_batch(batch)
-                    stats["processed_messages"] += success_count
+                    batch_stats = self._process_batch(batch)
+                    stats["processed_messages"] += batch_stats["processed"]
+                    stats["messages_with_embeddings"] += batch_stats["with_embeddings"]
+                    stats["short_messages_no_embedding"] += batch_stats["no_embeddings"]
                     stats["batch_count"] += 1
                 
         except Exception as e:
@@ -181,6 +229,7 @@ class TextMessageProcessor:
                 "message_text": body,
                 "timestamp": timestamp,
                 "thread_id": thread_id,
+                "sent": is_sent,
                 "meta_data": meta
             }
             
@@ -188,29 +237,38 @@ class TextMessageProcessor:
             logger.warning(f"Failed to extract message data: {e}")
             return None
 
-    def _process_batch(self, batch: List[Dict]) -> int:
+    def _process_batch(self, batch: List[Dict]) -> Dict[str, int]:
         """Process a batch of messages with embeddings and database storage"""
         logger.info(f"Processing batch of {len(batch)} messages...")
         
         success_count = 0
+        embedding_count = 0
+        short_message_count = 0
         
         try:
             with get_session() as session:
                 for message_data in batch:
                     try:
-                        # Generate embedding
-                        logger.debug(f"Generating embedding for: {message_data['message_text'][:50]}...")
-                        embedding = self.client.generate_embedding(message_data["message_text"])
+                        message_text = message_data["message_text"]
                         
-                        # Debug: show what keys are available
-                        logger.debug(f"Available keys in message_data: {list(message_data.keys())}")
+                        # Check message length - skip embedding for very short messages
+                        if len(message_text.strip()) <= 5:
+                            logger.debug(f"Skipping embedding for short message: '{message_text}'")
+                            embedding = None
+                            short_message_count += 1
+                        else:
+                            # Generate embedding for longer messages
+                            logger.debug(f"Generating embedding for: {message_text[:50]}...")
+                            embedding = self.client.generate_embedding(message_text)
+                            embedding_count += 1
                         
                         # Create Message object
                         db_message = Message(
                             source="text",
                             thread_id=message_data["thread_id"],
-                            message_text=message_data["message_text"],
+                            message_text=message_text,
                             timestamp=message_data["timestamp"],
+                            sent=message_data["sent"],
                             embedding=embedding,
                             meta_data=message_data["meta_data"]
                         )
@@ -227,12 +285,18 @@ class TextMessageProcessor:
                 # Commit the batch
                 session.commit()
                 logger.info(f"Successfully committed {success_count}/{len(batch)} messages to database")
+                logger.info(f"  - {embedding_count} messages with embeddings")
+                logger.info(f"  - {short_message_count} short messages (no embedding)")
                 
         except Exception as e:
             logger.error(f"Batch processing failed: {e}")
             raise
         
-        return success_count
+        return {
+            "processed": success_count,
+            "with_embeddings": embedding_count,
+            "no_embeddings": short_message_count
+        }
 
     
     def _log_final_stats(self, stats: Dict[str, int]):
@@ -240,15 +304,41 @@ class TextMessageProcessor:
         logger.info("=== TEXT MESSAGE PROCESSING STATISTICS ===")
         logger.info(f"Total lines read: {stats['total_lines']:,}")
         logger.info(f"Valid messages found: {stats['valid_messages']:,}")
+        logger.info(f"Participating threads found: {stats['participating_threads']:,}")
+        logger.info(f"Filtered by thread (Matt not participating): {stats['filtered_by_thread']:,}")
         logger.info(f"Filtered by date (before 2021-01-01): {stats['filtered_by_date']:,}")
         logger.info(f"Skipped duplicates: {stats['skipped_duplicates']:,}")
         logger.info(f"Successfully processed: {stats['processed_messages']:,}")
+        logger.info(f"  - With embeddings: {stats['messages_with_embeddings']:,}")
+        logger.info(f"  - Short messages (no embedding): {stats['short_messages_no_embedding']:,}")
         logger.info(f"Total batches: {stats['batch_count']:,}")
         logger.info(f"Errors encountered: {stats['errors']:,}")
         
         if stats["valid_messages"] > 0:
-            success_rate = (stats["processed_messages"] / (stats["valid_messages"] - stats["skipped_duplicates"] - stats["filtered_by_date"])) * 100
-            logger.info(f"Processing success rate: {success_rate:.1f}%")
+            remaining_after_filters = (stats["valid_messages"] - stats["skipped_duplicates"] - 
+                                     stats["filtered_by_date"] - stats["filtered_by_thread"])
+            if remaining_after_filters > 0:
+                success_rate = (stats["processed_messages"] / remaining_after_filters) * 100
+                logger.info(f"Processing success rate: {success_rate:.1f}%")
+        
+        if stats["processed_messages"] > 0:
+            embedding_percentage = (stats["messages_with_embeddings"] / stats["processed_messages"]) * 100
+            logger.info(f"Messages with embeddings: {embedding_percentage:.1f}%")
+            
+            # Estimate API cost savings from short message filtering
+            embedding_savings = stats["short_messages_no_embedding"] * 0.00002  # Rough OpenAI embedding cost
+            logger.info(f"API cost saved (short messages): ~${embedding_savings:.2f} ({stats['short_messages_no_embedding']:,} avoided calls)")
+            
+            # Additional savings from thread filtering
+            thread_savings = stats["filtered_by_thread"] * 0.00002
+            total_savings = embedding_savings + thread_savings
+            logger.info(f"API cost saved (thread filtering): ~${thread_savings:.2f} ({stats['filtered_by_thread']:,} avoided calls)")
+            logger.info(f"TOTAL API cost savings: ~${total_savings:.2f}")
+            
+            # Thread filtering efficiency
+            if stats["valid_messages"] > 0:
+                filter_efficiency = (stats["filtered_by_thread"] / stats["valid_messages"]) * 100
+                logger.info(f"Thread filtering efficiency: {filter_efficiency:.1f}% of messages avoided")
         
         logger.info("===========================================")
 

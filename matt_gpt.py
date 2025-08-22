@@ -11,16 +11,19 @@ logger = logging.getLogger(__name__)
 
 
 class MattResponse(dspy.Signature):
-    """Generate a response as Matt would, based on his history and personality."""
+    """Generate a response as Matt would, based on his history, personality, and conversation context."""
 
+    conversation_history = dspy.InputField(
+        desc="Previous messages in this conversation, chronologically ordered"
+    )
     context = dspy.InputField(
-        desc="Matt's relevant messages and personality information"
+        desc="Matt's relevant messages and personality information from RAG"
     )
     question = dspy.InputField(
-        desc="The query or prompt to respond to"
+        desc="The current query or prompt to respond to"
     )
     response = dspy.OutputField(
-        desc="Response in Matt's authentic voice and style"
+        desc="Response in Matt's authentic voice, considering conversation flow and context"
     )
 
 
@@ -31,8 +34,10 @@ class MattGPT(dspy.Module):
         # Don't create ChainOfThought here to avoid LM binding issues
         logger.info("MattGPT module initialized with retriever")
 
-    def forward(self, question: str, user_openrouter_key: Optional[str] = None):
+    def forward(self, question: str, user_openrouter_key: Optional[str] = None, conversation_history: str = ""):
         logger.info(f"Processing question: {question[:100]}...")
+        if conversation_history:
+            logger.info(f"Including conversation history: {len(conversation_history)} characters")
         
         # Retrieve relevant context
         logger.debug("Retrieving relevant context...")
@@ -73,15 +78,90 @@ class MattGPT(dspy.Module):
                 user_client = OpenRouterClient(api_key=user_openrouter_key)
                 logger.debug("OpenRouterClient created successfully")
                 
-                # Format prompt manually
-                prompt = f"""You are Matt, responding authentically based on your communication style and experiences.
+                # Load context files dynamically
+                def load_context_files():
+                    try:
+                        context_files = {}
+                        
+                        # Read personality and preferences
+                        with open('context/distilled_personality_and_preferences.md', 'r', encoding='utf-8') as f:
+                            context_files['distilled_personality_and_preferences.md'] = f.read()
+                        
+                        # Read personality report
+                        with open('context/personality_report.md', 'r', encoding='utf-8') as f:
+                            context_files['personality_report.md'] = f.read()
+                        
+                        # Read writing style
+                        with open('context/writing_style.md', 'r', encoding='utf-8') as f:
+                            context_files['writing_style.md'] = f.read()
+                        
+                        return context_files
+                    except Exception as e:
+                        logger.warning(f"Could not load context files: {e}")
+                        return {}
+                
+                context_files = load_context_files()
+                
+                # Format prompt with context files
+                project_context = ""
+                if context_files:
+                    project_context = f"""
+<matt_distilled_personality_and_preferences>
+{context_files.get('distilled_personality_and_preferences.md', '')}
+</matt_distilled_personality_and_preferences>
 
-Context from Matt's messages and personality:
+<matt_personality_report>
+{context_files.get('personality_report.md', '')}
+</matt_personality_report>
+
+<matt_writing_style>
+{context_files.get('writing_style.md', '')}
+</matt_writing_style>
+
+"""
+
+                # Format conversation history section
+                conversation_section = ""
+                if conversation_history:
+                    conversation_section = f"""
+**CONVERSATION HISTORY:**
+(Previous messages in this conversation - use this to maintain context and conversational flow)
+{conversation_history}
+
+"""
+
+                # Format prompt manually with enhanced context
+                prompt = f"""You are Matt's AI avatar, designed to authentically represent him in digital conversations. Your core purpose is to respond as Matt would, drawing from his extensive message history, personality documents, and communication patterns.
+
+**CRITICAL IDENTITY REQUIREMENTS:**
+- Respond as Matt himself, not as an AI describing Matt
+- Maintain his authentic voice: communication style, humor, tone, perspective, preferences, value system, and personality
+- Draw from the below retrieved context to inform your responses, but don't explicitly reference it directly
+- Preserve his typical response length and conversational patterns
+- Use his actual phrases, expressions, and way of thinking
+- Consider the conversation history to maintain context and natural flow
+
+Here is the context of Matt's personality and preferences:
+{project_context}
+
+{conversation_section}**RETRIEVED CONTEXT FROM MATT'S MESSAGE HISTORY:**
+(the context may or may not be relevant to the current question/conversation, so you must use your judgement to determine if it is relevant)
 {context_str}
 
-User question: {question}
+**CURRENT QUESTION/CONVERSATION:**
+{question}
 
-Respond as Matt would, using his voice and communication style:"""
+**RESPONSE INSTRUCTIONS:**
+- Respond directly to the CURRENT QUESTION/CONVERSATION as Matt would respond
+- Use the conversation history to maintain context and natural conversational flow
+- Use the retrieved context to inform your response but don't explicitly reference it
+- Maintain authenticity over perfection
+- Match Matt's communication style from the retrieved messages and by following the rules in the matt_writing_style context
+- Keep responses conversational and natural to his voice
+- Include no other text than the response to the question/conversation
+- Do not hallucinate or make up information or preferences that you are not very sure Matt would say
+- If you're very unsure about something, just say you don't know in a way that is consistent with Matt's personality
+"""
 
                 # === PROMPT INPUT LOGGING ===
                 logger.info("=" * 60)
@@ -92,7 +172,7 @@ Respond as Matt would, using his voice and communication style:"""
 
                 logger.debug("Calling chat_completion...")
                 messages = [{"role": "user", "content": prompt}]
-                response = user_client.chat_completion(messages=messages, max_tokens=1000)
+                response = user_client.chat_completion(messages=messages)
                 logger.debug("chat_completion returned successfully")
                 
                 response_text = response.choices[0].message.content
@@ -122,6 +202,9 @@ Respond as Matt would, using his voice and communication style:"""
             logger.info("=" * 60)
             logger.info("RAW PROMPT INPUT (Environment OpenRouter Key):")
             logger.info("=" * 60)
+            if conversation_history:
+                logger.info(f"CONVERSATION HISTORY:\n{conversation_history}")
+                logger.info("-" * 40)
             logger.info(f"CONTEXT:\n{context_str}")
             logger.info("-" * 40)
             logger.info(f"QUESTION: {question}")
@@ -129,6 +212,7 @@ Respond as Matt would, using his voice and communication style:"""
             
             generate = dspy.ChainOfThought(MattResponse)
             prediction = generate(
+                conversation_history=conversation_history,
                 context=context_str,
                 question=question
             )
@@ -169,8 +253,7 @@ def setup_dspy():
         model="openrouter/anthropic/claude-3.5-sonnet",
         api_key=openrouter_key,
         api_base="https://openrouter.ai/api/v1",
-        temperature=0.7,
-        max_tokens=1000
+        temperature=0.4
     )
     logger.info("DSPy language model configured: anthropic/claude-3.5-sonnet")
 

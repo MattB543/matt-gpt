@@ -13,6 +13,7 @@ class Message(SQLModel, table=True):
     thread_id: Optional[str] = Field(index=True)
     message_text: str
     timestamp: datetime = Field(index=True)
+    sent: bool = Field(index=True)  # True if Matt sent it, False if received
     embedding: Optional[list[float]] = Field(
         default=None, sa_column=Column(Vector(1536))  # OpenAI text-embedding-3-small
     )
@@ -40,6 +41,7 @@ class QueryLog(SQLModel, table=True):
     __tablename__ = "query_logs"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    conversation_id: uuid.UUID = Field(index=True)  # NEW: Track conversation continuity
     query_text: str
     response_text: str
     model_used: str
@@ -49,4 +51,4 @@ class QueryLog(SQLModel, table=True):
     ip_address: Optional[str]
     user_agent: Optional[str]
     meta_data: dict = Field(default={}, sa_column=Column(JSON))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)

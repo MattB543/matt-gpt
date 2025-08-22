@@ -55,13 +55,12 @@ class OpenRouterClient:
     def chat_completion(
         self,
         messages: list,
-        model: str = "anthropic/claude-3.5-sonnet",
-        temperature: float = 0.7,
-        max_tokens: int = 1000
+        model: str = "anthropic/claude-sonnet-4",
+        temperature: float = 0.7
     ):
         """Get chat completion from OpenRouter"""
         logger.info(f"Requesting chat completion with model: {model}")
-        logger.debug(f"Message count: {len(messages)}, max_tokens: {max_tokens}")
+        logger.debug(f"Message count: {len(messages)}")
         
         # Get trace context if available
         trace = get_current_trace()
@@ -74,8 +73,7 @@ class OpenRouterClient:
             response = self.client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
+                temperature=temperature
             )
             
             response_text = response.choices[0].message.content
@@ -83,8 +81,7 @@ class OpenRouterClient:
                 "model": model,
                 "usage": response.usage.model_dump() if response.usage else None,
                 "finish_reason": response.choices[0].finish_reason,
-                "temperature": temperature,
-                "max_tokens": max_tokens
+                "temperature": temperature
             }
             
             # Log to trace if available
