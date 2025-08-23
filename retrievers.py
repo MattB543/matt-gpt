@@ -51,7 +51,7 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
                 # 1. Find relevant messages with context
                 logger.debug("Retrieving relevant messages with context...")
                 messages = self._retrieve_messages_with_context(
-                    conn, query_embedding, limit=10, context_window=10
+                    conn, query_embedding, limit=15, context_window=10
                 )
                 results.extend(messages)
                 logger.info(f"Retrieved {len(messages)} message contexts")
@@ -73,7 +73,7 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
                 # 2. Find relevant personality docs
                 logger.debug("Retrieving relevant personality documents...")
                 docs = self._retrieve_personality_docs(
-                    conn, query_embedding, limit=5
+                    conn, query_embedding, limit=3
                 )
                 results.extend(docs)
                 logger.info(f"Retrieved {len(docs)} personality documents")
@@ -103,12 +103,12 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
         return dspy.Prediction(passages=results)
 
     def _retrieve_messages_with_context(
-        self, conn, embedding: list, limit: int = 10, context_window: int = 10
+        self, conn, embedding: list, limit: int = 15, context_window: int = 10
     ) -> List[str]:
-        """Retrieve messages with surrounding context, grouped by thread and date"""
-        logger.debug(f"Searching for {limit} most relevant messages with {context_window}min context window")
+        """Retrieve the top N most relevant individual messages, then get full thread context for each"""
+        logger.debug(f"Searching for {limit} most relevant individual messages, then retrieving full thread context")
 
-        # First, find relevant messages (only those with >20 chars)
+        # First, find the most relevant individual messages (only those with >20 chars)
         relevant_query = """
         SELECT id, thread_id, message_text, timestamp, (embedding <=> %s::vector) as distance
         FROM messages
@@ -120,22 +120,24 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
 
         try:
             with conn.cursor() as cur:
-                # Get relevant messages
+                # Get the top N most relevant individual messages
                 cur.execute(relevant_query, (embedding, embedding, limit))
                 relevant_messages = cur.fetchall()
-                logger.debug(f"Found {len(relevant_messages)} relevant messages with >20 chars")
+                logger.debug(f"Found {len(relevant_messages)} most relevant individual messages")
 
                 if not relevant_messages:
                     return []
 
-                # Get unique thread_id and date combinations from relevant messages
+                # Get unique thread_id and date combinations from these specific messages
                 thread_dates = set()
                 for _, thread_id, _, timestamp, _ in relevant_messages:
                     if thread_id:
                         date_str = timestamp.date()
                         thread_dates.add((thread_id, date_str))
 
-                # Now get ALL messages from those thread/date combinations
+                logger.debug(f"Will retrieve full context from {len(thread_dates)} thread/date combinations")
+
+                # Now get ALL messages from those thread/date combinations for full context
                 all_context_messages = []
                 for thread_id, date in thread_dates:
                     context_query = """
@@ -207,7 +209,7 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
         return formatted
 
     def _retrieve_personality_docs(
-        self, conn, embedding: list, limit: int = 5
+        self, conn, embedding: list, limit: int = 3
     ) -> List[str]:
         """Retrieve relevant personality documents"""
         logger.debug(f"Searching for {limit} most relevant personality documents")

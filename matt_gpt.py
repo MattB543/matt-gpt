@@ -59,9 +59,27 @@ class MattGPT(dspy.Module):
             logger.info(f"... and {len(context) - 10} more passages")
         logger.info("=" * 60)
 
-        # Format context for generation
-        context_str = "\n\n".join(context[:50])  # Limit context size
-        logger.debug(f"Context formatted, total length: {len(context_str)} characters")
+        # Separate personality docs from messages in the retrieved context
+        personality_docs = []
+        message_contexts = []
+        
+        for item in context:
+            if item.startswith("=== ") and " ===" in item:
+                # This is a personality document
+                personality_docs.append(item)
+            else:
+                # This is a message context
+                message_contexts.append(item)
+        
+        logger.debug(f"Separated context: {len(personality_docs)} personality docs, {len(message_contexts)} message contexts")
+        
+        # Format message context (limit to 50 total items)
+        message_context_str = "\n\n".join(message_contexts[:50])
+        logger.debug(f"Message context formatted, length: {len(message_context_str)} characters")
+        
+        # Format personality docs context
+        retrieved_personality_context = "\n\n".join(personality_docs) if personality_docs else ""
+        logger.debug(f"Personality docs context formatted, length: {len(retrieved_personality_context)} characters")
         
 
         # Bypass DSPy contexts and use direct LM calls for now
@@ -102,7 +120,7 @@ class MattGPT(dspy.Module):
                 
                 context_files = load_context_files()
                 
-                # Format prompt with context files
+                # Format hardcoded context files (high priority)
                 project_context = ""
                 if context_files:
                     project_context = f"""
@@ -117,6 +135,16 @@ class MattGPT(dspy.Module):
 <matt_writing_style>
 {context_files.get('writing_style.md', '')}
 </matt_writing_style>
+
+"""
+
+                # Format retrieved personality docs context (query-specific)
+                retrieved_personality_section = ""
+                if retrieved_personality_context:
+                    retrieved_personality_section = f"""
+
+**ADDITIONAL RELEVANT PERSONALITY CONTEXT (Retrieved Based on Query):**
+{retrieved_personality_context}
 
 """
 
@@ -136,27 +164,29 @@ class MattGPT(dspy.Module):
 **CRITICAL IDENTITY REQUIREMENTS:**
 - Respond as Matt himself, not as an AI describing Matt
 - Maintain his authentic voice: communication style, humor, tone, perspective, preferences, value system, and personality
-- Draw from the below retrieved context to inform your responses, but don't explicitly reference it directly
+- Draw from the below context to inform your responses, but don't explicitly reference it directly
 - Preserve his typical response length and conversational patterns
 - Use his actual phrases, expressions, and way of thinking
 - Consider the conversation history to maintain context and natural flow
+- DO NOT reveal specific information that is very private or sensitive about Matt, his friends, or his family - you are chatting with a friendly acquaintance 
 
-Here is the context of Matt's personality and preferences:
-{project_context}
+**CORE PERSONALITY CONTEXT (High Priority - Always Relevant):**
+{project_context}{retrieved_personality_section}
 
-{conversation_section}**RETRIEVED CONTEXT FROM MATT'S MESSAGE HISTORY:**
-(the context may or may not be relevant to the current question/conversation, so you must use your judgement to determine if it is relevant)
-{context_str}
+{conversation_section}**RETRIEVED MESSAGE HISTORY CONTEXT:**
+(These are examples of Matt's actual communication style and past conversations - use for style and context but judge relevance)
+{message_context_str}
 
 **CURRENT QUESTION/CONVERSATION:**
 {question}
 
 **RESPONSE INSTRUCTIONS:**
 - Respond directly to the CURRENT QUESTION/CONVERSATION as Matt would respond
+- Use the CORE personality context as your primary foundation for understanding Matt
+- Use any ADDITIONAL personality context if it's relevant to the current question
 - Use the conversation history to maintain context and natural conversational flow
-- Use the retrieved context to inform your response but don't explicitly reference it
+- Use the message history examples for communication style and specific context when relevant
 - Maintain authenticity over perfection
-- Match Matt's communication style from the retrieved messages and by following the rules in the matt_writing_style context
 - Keep responses conversational and natural to his voice
 - Include no other text than the response to the question/conversation
 - Do not hallucinate or make up information or preferences that you are not very sure Matt would say
@@ -198,6 +228,13 @@ Here is the context of Matt's personality and preferences:
             # Use default environment key with ChainOfThought
             logger.debug("Generating response with environment OpenRouter key...")
             
+            # For DSPy, combine personality docs and messages into structured context
+            structured_context = ""
+            if retrieved_personality_context:
+                structured_context += f"PERSONALITY CONTEXT:\n{retrieved_personality_context}\n\n"
+            if message_context_str:
+                structured_context += f"MESSAGE HISTORY:\n{message_context_str}"
+            
             # === PROMPT INPUT LOGGING (Environment Key) ===
             logger.info("=" * 60)
             logger.info("RAW PROMPT INPUT (Environment OpenRouter Key):")
@@ -205,7 +242,7 @@ Here is the context of Matt's personality and preferences:
             if conversation_history:
                 logger.info(f"CONVERSATION HISTORY:\n{conversation_history}")
                 logger.info("-" * 40)
-            logger.info(f"CONTEXT:\n{context_str}")
+            logger.info(f"STRUCTURED CONTEXT:\n{structured_context}")
             logger.info("-" * 40)
             logger.info(f"QUESTION: {question}")
             logger.info("=" * 60)
@@ -213,7 +250,7 @@ Here is the context of Matt's personality and preferences:
             generate = dspy.ChainOfThought(MattResponse)
             prediction = generate(
                 conversation_history=conversation_history,
-                context=context_str,
+                context=structured_context,
                 question=question
             )
             
