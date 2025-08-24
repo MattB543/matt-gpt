@@ -3,6 +3,7 @@
 ## Authentication Requirements
 
 ### Bearer Token Authentication
+
 All API requests (except `/health`) require a bearer token:
 
 ```bash
@@ -10,38 +11,43 @@ Authorization: Bearer matt-gpt-secure-bearer-token-2025
 ```
 
 ### OpenRouter API Key
+
 Users must provide their own OpenRouter API key in each chat request to pay for LLM costs:
 
 ```json
 {
   "message": "Your question here",
   "openrouter_api_key": "sk-or-v1-your-key-here",
-  "model": "anthropic/claude-3.5-sonnet"
+  "model": "anthropic/claude-sonnet-4"
 }
 ```
 
 ## API Endpoints
 
 ### POST /chat
+
 Generate a response using Matt's AI avatar.
 
 **Headers:**
+
 ```
 Authorization: Bearer matt-gpt-secure-bearer-token-2025
 Content-Type: application/json
 ```
 
 **Request Body:**
+
 ```json
 {
   "message": "What's your approach to software development?",
   "openrouter_api_key": "sk-or-v1-your-openrouter-key",
-  "model": "anthropic/claude-3.5-sonnet",
+  "model": "anthropic/claude-sonnet-4",
   "context": {}
 }
 ```
 
 **Response:**
+
 ```json
 {
   "response": "I'm a strong believer in iterative development...",
@@ -52,9 +58,11 @@ Content-Type: application/json
 ```
 
 ### GET /health
+
 Check system health (no authentication required).
 
 **Response:**
+
 ```json
 {
   "status": "healthy",
@@ -65,6 +73,7 @@ Check system health (no authentication required).
 ## Example Usage
 
 ### Python Example
+
 ```python
 import requests
 
@@ -88,6 +97,7 @@ print(response.json())
 ```
 
 ### Curl Example
+
 ```bash
 curl -X POST "http://your-server.com/chat" \
   -H "Authorization: Bearer matt-gpt-secure-bearer-token-2025" \
@@ -107,7 +117,8 @@ curl -X POST "http://your-server.com/chat" \
 ## Available Models
 
 All OpenRouter models are supported. Popular choices:
-- `anthropic/claude-3.5-sonnet` (recommended)
+
+- `anthropic/claude-sonnet-4` (recommended)
 - `openai/gpt-4o`
 - `openai/gpt-4o-mini` (cost-effective)
 

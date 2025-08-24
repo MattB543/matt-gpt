@@ -31,7 +31,7 @@ def test_api():
     payload = {
         "message": "How do you approach product development?",
         "openrouter_api_key": openrouter_key,
-        "model": "anthropic/claude-3.5-sonnet"
+        "model": "anthropic/claude-sonnet-4"
     }
     
     print("Testing Matt-GPT API...")

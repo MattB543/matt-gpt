@@ -12,9 +12,10 @@ import asyncio
 from datetime import datetime
 
 from database import init_db, get_session
-from models import QueryLog
+from models import QueryLog, Message
 from matt_gpt import setup_dspy
 from conversation_history import ConversationHistoryService, ChatMessage
+from llm_client import OpenRouterClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -94,7 +95,8 @@ class ChatRequest(BaseModel):
     openrouter_api_key: str  # User must provide their own API key
     conversation_id: Optional[uuid.UUID] = None  # NEW: Continue existing conversation or start new
     context: Optional[dict] = {}
-    model: Optional[str] = "anthropic/claude-3.5-sonnet"
+    model: Optional[str] = "anthropic/claude-sonnet-4"
+    other_conversation_context: Optional[bool] = True  # NEW: Include past conversations in RAG (default: True)
 
 
 class ChatResponse(BaseModel):
@@ -147,7 +149,53 @@ async def log_query(
         session.commit()
 
 
-def run_with_logging(matt_gpt, question, api_key, conversation_history=""):
+# Helper function to save conversation messages to the Message table
+async def save_conversation_message(
+    message_text: str,
+    conversation_id: uuid.UUID,
+    query_id: str,
+    from_matt_gpt: bool,
+    sent: bool = True  # For Matt-GPT conversations, this represents user (False) vs Matt (True)
+):
+    """Save conversation message to Message table for RAG context"""
+    try:
+        logger.info(f"Attempting to save {'assistant' if from_matt_gpt else 'user'} message to database")
+        
+        # Generate embedding for the message - use system API key
+        system_api_key = os.getenv("OPENROUTER_API_KEY")
+        if not system_api_key:
+            logger.error("System OPENROUTER_API_KEY not available for embedding generation")
+            return
+            
+        embedding_client = OpenRouterClient(api_key=system_api_key)
+        embedding = embedding_client.generate_embedding(message_text)
+        logger.info("Embedding generated successfully")
+        
+        with get_session() as session:
+            message = Message(
+                source="matt-gpt conversation",
+                thread_id=str(conversation_id),  # Use conversation_id as thread_id
+                message_text=message_text,
+                timestamp=datetime.utcnow(),
+                sent=sent,  # True for Matt's responses, False for user messages
+                from_matt_gpt=from_matt_gpt,
+                embedding=embedding,
+                meta_data={
+                    "conversation_id": str(conversation_id),
+                    "query_id": query_id,
+                    "message_type": "assistant" if from_matt_gpt else "user"
+                }
+            )
+            session.add(message)
+            session.commit()
+            logger.info(f"Successfully saved {'assistant' if from_matt_gpt else 'user'} message to Message table")
+    
+    except Exception as e:
+        logger.error(f"Failed to save conversation message: {e}", exc_info=True)
+        # Don't raise - this is a background operation that shouldn't break the main flow
+
+
+def run_with_logging(matt_gpt, question, api_key, conversation_history="", query_id=None, other_conversation_context=True):
     """Wrapper to add console logging to matt_gpt processing"""
     
     # === REQUEST LOGGING ===
@@ -156,7 +204,8 @@ def run_with_logging(matt_gpt, question, api_key, conversation_history=""):
     logger.info("=" * 80)
     logger.info(f"USER QUESTION: {question}")
     logger.info(f"API KEY (truncated): {api_key[:20]}...")
-    logger.info(f"MODEL: anthropic/claude-3.5-sonnet")
+    logger.info(f"MODEL: anthropic/claude-sonnet-4")
+    logger.info(f"OTHER CONVERSATION CONTEXT: {other_conversation_context}")
     if conversation_history:
         logger.info(f"CONVERSATION HISTORY: {len(conversation_history)} characters")
     logger.info("=" * 80)
@@ -166,7 +215,9 @@ def run_with_logging(matt_gpt, question, api_key, conversation_history=""):
         result = matt_gpt.forward(
             question=question,
             user_openrouter_key=api_key,
-            conversation_history=conversation_history
+            conversation_history=conversation_history,
+            query_id=query_id,
+            other_conversation_context=other_conversation_context
         )
         
         response_text = result.response
@@ -228,6 +279,7 @@ async def chat_endpoint(
     
     # Handle conversation continuity
     conversation_id = request.conversation_id or uuid.uuid4()
+    logger.info(f"CONVERSATION ID SET TO: {conversation_id} (type: {type(conversation_id)})")
     
     # Log the API request details
     logger.info(f"API Request to /chat endpoint")
@@ -268,13 +320,15 @@ async def chat_endpoint(
                 app.state.matt_gpt,
                 request.message,
                 request.openrouter_api_key,
-                history_for_llm
+                history_for_llm,
+                query_id,
+                request.other_conversation_context
             )
         
         # Run in thread pool with timeout
         result = await asyncio.wait_for(
             asyncio.to_thread(run_matt_gpt_with_logging),
-            timeout=30.0
+            timeout=60.0
         )
         
         response_text = result.response
@@ -290,9 +344,9 @@ async def chat_endpoint(
         is_error = False
         
     except asyncio.TimeoutError:
-        logger.error("MattGPT generation timed out after 30 seconds")
+        logger.error("MattGPT generation timed out after 60 seconds")
         response_text = "Sorry, the request timed out. The system is experiencing slow response times."
-        error_details = "Request timeout (30s)"
+        error_details = "Request timeout (60s)"
         context_used = []
         is_error = True
         
@@ -310,22 +364,27 @@ async def chat_endpoint(
     logger.info(f"Generated response in {latency_ms:.2f}ms")
     
     # Build complete conversation history for response
-    current_exchange = [
-        ChatMessage(
-            role="user",
-            content=request.message,
-            timestamp=datetime.utcnow(),
-            query_id=uuid.UUID(query_id)
-        ),
-        ChatMessage(
-            role="assistant",
-            content=response_text,
-            timestamp=datetime.utcnow(),
-            query_id=uuid.UUID(query_id)
-        )
-    ]
-    full_history = history + current_exchange
-    logger.info(f"Built full conversation history with {len(full_history)} messages")
+    try:
+        current_exchange = [
+            ChatMessage(
+                role="user",
+                content=request.message,
+                timestamp=datetime.utcnow(),
+                query_id=uuid.UUID(query_id)
+            ),
+            ChatMessage(
+                role="assistant",
+                content=response_text,
+                timestamp=datetime.utcnow(),
+                query_id=uuid.UUID(query_id)
+            )
+        ]
+        full_history = history + current_exchange
+        logger.info(f"Built full conversation history with {len(full_history)} messages")
+    except Exception as e:
+        logger.error(f"Error building conversation history: {e}")
+        # Fallback to empty history
+        full_history = []
     
     # Schedule background logging with conversation_id
     background_tasks.add_task(
@@ -345,17 +404,44 @@ async def chat_endpoint(
         client_info=client_info
     )
     
+    # NEW: Schedule background tasks to save conversation messages to Message table for RAG
+    background_tasks.add_task(
+        save_conversation_message,
+        message_text=request.message,
+        conversation_id=conversation_id,
+        query_id=query_id,
+        from_matt_gpt=False,  # User message
+        sent=False  # User sent it to Matt-GPT
+    )
+    
+    background_tasks.add_task(
+        save_conversation_message,
+        message_text=response_text,
+        conversation_id=conversation_id,
+        query_id=query_id,
+        from_matt_gpt=True,  # Assistant message 
+        sent=True  # Matt-GPT is sending the response
+    )
+    
     logger.debug(f"Query {query_id} logged for analytics")
     
     # Very basic completion logging
     print(f"*** CHAT COMPLETE! Response: {response_text[:50]}...")
     print(f"*** Took: {latency_ms:.2f}ms")
     
+    # Debug logging for response construction
+    logger.info(f"Building ChatResponse:")
+    logger.info(f"  conversation_id: {conversation_id} (type: {type(conversation_id)})")
+    logger.info(f"  query_id: {query_id}")
+    logger.info(f"  history length: {len(full_history)}")
+    logger.info(f"  is_error: {is_error}")
+    logger.info(f"  full_history sample: {full_history[:1] if full_history else []}")
+    
     return ChatResponse(
         response=response_text,
-        conversation_id=conversation_id,  # NEW: Always return conversation ID
+        conversation_id=conversation_id,
         query_id=query_id,
-        history=full_history,  # NEW: Return complete conversation history
+        history=full_history,
         ok=not is_error,
         error_details=error_details,
         latency_ms=latency_ms,

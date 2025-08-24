@@ -141,7 +141,7 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
                 all_context_messages = []
                 for thread_id, date in thread_dates:
                     context_query = """
-                    SELECT message_text, timestamp, thread_id, meta_data
+                    SELECT message_text, timestamp, thread_id, meta_data, source, from_matt_gpt
                     FROM messages
                     WHERE thread_id = %s 
                     AND DATE(timestamp) = %s
@@ -170,38 +170,55 @@ class PostgreSQLVectorRetriever(dspy.Retrieve):
                 })
             trace.log_vector_search(embedding, search_results)
 
-        # Group and format messages by thread and date
+        # Helper function to filter names for family only
+        def filter_sender_name(display_name: str, phone_number: str = "") -> str:
+            """Filter sender names to only show family members, others become 'Someone:'"""
+            if not display_name:
+                display_name = phone_number
+            
+            # Replace Sisterr<3 with Danielle Brooks
+            if display_name == "Sisterr<3":
+                display_name = "Danielle Brooks"
+            
+            # Family names to keep
+            family_names = {"Natalie Brooks", "Sarah Brooks", "Mom", "Dad", "Danielle Brooks"}
+            
+            if display_name in family_names:
+                return display_name
+            else:
+                return "Someone"
+        
+        # Group and format messages by thread, date, and source type
         from collections import defaultdict
         grouped_messages = defaultdict(list)
-        thread_display_names = {}
         
-        for text, timestamp, thread_id, meta_data in all_context_messages:
+        for text, timestamp, thread_id, meta_data, source, from_matt_gpt in all_context_messages:
             date_str = timestamp.date().strftime("%Y-%m-%d")
             
-            # Get display name from meta_data if available for thread header
-            thread_display_name = thread_id
-            if meta_data and isinstance(meta_data, dict) and 'display_name' in meta_data:
-                thread_display_name = meta_data['display_name']
-                thread_display_names[thread_id] = thread_display_name
-            elif thread_id in thread_display_names:
-                thread_display_name = thread_display_names[thread_id]
+            # Determine sender name based on message source
+            if source == "matt-gpt conversation":
+                # Matt-GPT conversation message
+                if from_matt_gpt:
+                    sender_name = "Matt"
+                else:
+                    sender_name = "User"
+                key = f"Matt-GPT Conversation {thread_id[-5:]} - {date_str}"
+            else:
+                # Text/Slack message
+                if meta_data and isinstance(meta_data, dict):
+                    display_name = meta_data.get('display_name', '')
+                    sender_name = filter_sender_name(display_name)
+                else:
+                    sender_name = "Unknown"
+                key = f"Thread {thread_id} - {date_str}"
             
-            # Get sender name for message prefix
-            sender_name = "Unknown"
-            if meta_data and isinstance(meta_data, dict):
-                if 'display_name' in meta_data:
-                    sender_name = meta_data['display_name']
-                elif 'phone_number' in meta_data:
-                    sender_name = meta_data['phone_number']
-            
-            key = f"{thread_display_name} - {date_str}"
-            grouped_messages[key].append((timestamp, text, sender_name))
+            grouped_messages[key].append((timestamp, text, sender_name, source))
 
         # Format chronologically with thread/date headers
         formatted = []
         for thread_date, messages in sorted(grouped_messages.items()):
             formatted.append(f"\n=== {thread_date} ===")
-            for timestamp, text, sender_name in sorted(messages):
+            for timestamp, text, sender_name, source in sorted(messages):
                 formatted.append(f"{sender_name}: {text}")
             formatted.append("")  # Add blank line between groups
 

@@ -39,7 +39,7 @@ def test_api_with_rag():
         
         chat_data = {
             "message": "What's your philosophy on software development?",
-            "model": "anthropic/claude-3.5-sonnet"
+            "model": "anthropic/claude-sonnet-4"
         }
         
         print("   Sending request (this may take 10-20 seconds for RAG + LLM)...")

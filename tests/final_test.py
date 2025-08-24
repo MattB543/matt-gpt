@@ -36,7 +36,7 @@ def run_final_test():
         print("3. Testing chat endpoint...")
         chat_data = {
             "message": "Hello Matt-GPT! This is a validation test.",
-            "model": "anthropic/claude-3.5-sonnet"
+            "model": "anthropic/claude-sonnet-4"
         }
         
         chat_response = requests.post(

@@ -78,7 +78,7 @@ def test_authentication():
             chat_data = {
                 "message": "What's your approach to software development?",
                 "openrouter_api_key": user_openrouter_key,
-                "model": "anthropic/claude-3.5-sonnet"
+                "model": "anthropic/claude-sonnet-4"
             }
             
             try:

@@ -31,19 +31,53 @@ class MattGPT(dspy.Module):
     def __init__(self, retriever):
         super().__init__()
         self.retrieve = retriever
-        # Don't create ChainOfThought here to avoid LM binding issues
-        logger.info("MattGPT module initialized with retriever")
+        # Check if this is an enhanced RAG retriever
+        self.is_enhanced_rag = hasattr(retriever, 'enhanced_retrieve')
+        logger.info(f"MattGPT module initialized with {'enhanced' if self.is_enhanced_rag else 'standard'} retriever")
 
-    def forward(self, question: str, user_openrouter_key: Optional[str] = None, conversation_history: str = ""):
+    def forward(self, question: str, user_openrouter_key: Optional[str] = None, conversation_history: str = "", query_id: Optional[str] = None, other_conversation_context: bool = True):
         logger.info(f"Processing question: {question[:100]}...")
         if conversation_history:
             logger.info(f"Including conversation history: {len(conversation_history)} characters")
         
-        # Retrieve relevant context
+        # Retrieve relevant context using appropriate RAG system
         logger.debug("Retrieving relevant context...")
-        context_result = self.retrieve(question)
-        context = context_result.passages
-        logger.info(f"Retrieved {len(context)} context passages")
+        logger.info(f"Other conversation context enabled: {other_conversation_context}")
+        
+        if other_conversation_context:
+            if self.is_enhanced_rag:
+                # Use enhanced RAG system
+                if not query_id:
+                    import uuid
+                    query_id = str(uuid.uuid4())
+                
+                context, rag_metrics = self.retrieve.enhanced_retrieve(question, query_id)
+                logger.info(f"Enhanced RAG retrieved {len(context)} context passages")
+                
+                # Save analytics in background
+                try:
+                    self.retrieve.save_analytics(query_id, rag_metrics)
+                except Exception as e:
+                    logger.warning(f"Failed to save RAG analytics: {e}")
+            else:
+                # Use standard RAG system
+                context_result = self.retrieve(question)
+                context = context_result.passages
+                logger.info(f"Standard RAG retrieved {len(context)} context passages")
+        else:
+            # Skip conversation retrieval - only use personality docs from retriever
+            logger.info("Skipping conversation context retrieval - personality-only mode")
+            if self.is_enhanced_rag:
+                # Get only personality docs using enhanced retriever
+                context = self.retrieve.get_personality_docs_only(question)
+                logger.info(f"Enhanced RAG personality-only retrieved {len(context)} personality docs")
+            else:
+                # For standard retriever, we'll extract personality docs from a basic retrieval
+                context_result = self.retrieve(question)
+                all_context = context_result.passages
+                # Filter to only personality docs
+                context = [item for item in all_context if item.startswith("=== ") and " ===" in item]
+                logger.info(f"Standard RAG personality-only filtered {len(context)} personality docs from {len(all_context)} total")
 
         # === RAG RESULTS LOGGING ===
         logger.info("=" * 60)
@@ -287,21 +321,34 @@ def setup_dspy():
     logger.debug("Configuring DSPy language model...")
     # Use LiteLLM through DSPy for OpenRouter compatibility
     lm = dspy.LM(
-        model="openrouter/anthropic/claude-3.5-sonnet",
+        model="openrouter/anthropic/claude-sonnet-4",
         api_key=openrouter_key,
         api_base="https://openrouter.ai/api/v1",
         temperature=0.4
     )
-    logger.info("DSPy language model configured: anthropic/claude-3.5-sonnet")
+    logger.info("DSPy language model configured: anthropic/claude-sonnet-4")
 
-    logger.debug("Configuring PostgreSQL vector retriever...")
-    # Configure retriever
-    from retrievers import PostgreSQLVectorRetriever
-    retriever = PostgreSQLVectorRetriever(
-        connection_string=database_url,
-        k=20
-    )
-    logger.info("PostgreSQL vector retriever configured with k=20")
+    logger.debug("Configuring retriever...")
+    
+    # Check if enhanced RAG is enabled
+    enhanced_rag_enabled = os.getenv("ENHANCED_RAG_ENABLED", "false").lower() == "true"
+    
+    if enhanced_rag_enabled:
+        logger.info("Enhanced RAG system enabled")
+        from enhanced_retrievers import EnhancedRAGRetriever
+        retriever = EnhancedRAGRetriever(
+            connection_string=database_url,
+            k=20
+        )
+        logger.info("Enhanced RAG retriever configured with k=20")
+    else:
+        logger.info("Using standard RAG system")
+        from retrievers import PostgreSQLVectorRetriever
+        retriever = PostgreSQLVectorRetriever(
+            connection_string=database_url,
+            k=20
+        )
+        logger.info("PostgreSQL vector retriever configured with k=20")
 
     logger.debug("Configuring DSPy settings...")
     dspy.settings.configure(lm=lm, rm=retriever)

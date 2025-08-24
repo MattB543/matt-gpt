@@ -51,7 +51,7 @@ def test_phase2_complete():
             
             chat_data = {
                 "message": test_case["question"],
-                "model": "anthropic/claude-3.5-sonnet"
+                "model": "anthropic/claude-sonnet-4"
             }
             
             response = requests.post(

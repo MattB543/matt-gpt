@@ -30,7 +30,7 @@ def test_integration():
             print("\n2. Testing chat endpoint...")
             chat_payload = {
                 "message": "Hello, this is a test message",
-                "model": "anthropic/claude-3.5-sonnet"
+                "model": "anthropic/claude-sonnet-4"
             }
             
             chat_response = requests.post(
